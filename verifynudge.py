@@ -18,11 +18,12 @@ LOG = logging.getLogger("VerifyNudge")
 class Config:
     token: str
     guild_id: int
-    channel_id: int
+    channel_id: int | None
     role_id: int | None
     role_name: str
     message_id: int | None
     rules_channel_id: int | None
+    rules_message_id: int | None
     dry_run: bool
     batch_size: int
     state_path: Path
@@ -41,8 +42,11 @@ def config() -> Config:
     token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
     guild_id = optional_id(os.getenv("DISCORD_GUILD_ID"))
     channel_id = optional_id(os.getenv("DISCORD_VERIFICATION_CHANNEL_ID"))
-    if not token or not guild_id or not channel_id:
-        raise ValueError("Specify DISCORD_BOT_TOKEN, DISCORD_GUILD_ID and DISCORD_VERIFICATION_CHANNEL_ID")
+    if not token or not guild_id:
+        raise ValueError("Specify DISCORD_BOT_TOKEN and DISCORD_GUILD_ID")
+    rules_channel_id = optional_id(os.getenv("DISCORD_RULES_CHANNEL_ID"))
+    if not rules_channel_id:
+        raise ValueError("DISCORD_RULES_CHANNEL_ID is required for private DM reminders")
     batch_size = int(os.getenv("MAX_NOTIFICATIONS_PER_RUN", "9999"))
     if not 1 <= batch_size <= 9999:
         raise ValueError("MAX_NOTIFICATIONS_PER_RUN must be 1..9999")
@@ -51,9 +55,10 @@ def config() -> Config:
         role_id=optional_id(os.getenv("DISCORD_MUTED_ROLE_ID")),
         role_name=os.getenv("DISCORD_MUTED_ROLE_NAME", "Muted"),
         message_id=optional_id(os.getenv("DISCORD_VERIFICATION_MESSAGE_ID")),
-        rules_channel_id=optional_id(os.getenv("DISCORD_RULES_CHANNEL_ID")),
+        rules_channel_id=rules_channel_id,
+        rules_message_id=optional_id(os.getenv("DISCORD_RULES_MESSAGE_ID")),
         dry_run=os.getenv("DRY_RUN", "true").lower() not in ("false", "0", "no"),
-        batch_size=batch_size, state_path=ROOT / "data" / f"state-{guild_id}.json",
+        batch_size=batch_size, state_path=ROOT / "data" / f"dm-state-{guild_id}.json",
     )
 
 def load_state(path: Path, guild_id: int) -> set[int]:
@@ -78,69 +83,26 @@ def plan(
         return sorted(muted - notified)[:limit]
     return [uid for uid in ordered_ids if uid in muted and uid not in notified][:limit]
 
-def reminder_content(user_id: int, rules_channel_id: int) -> str:
-    """Build a clickable reminder to react to the rules post."""
+def reminder_content(
+    guild_name: str, guild_id: int, rules_channel_id: int, rules_message_id: int | None
+) -> str:
+    """Private DM containing a clickable link to the rules/reaction post."""
+    url = f"https://discord.com/channels/{guild_id}/{rules_channel_id}"
+    if rules_message_id:
+        url += f"/{rules_message_id}"
     return (
-        f"<@{user_id}> 認証がまだ完了していないようです。"
-        f"ルールチャンネル <#{rules_channel_id}> にあるルール確認の投稿を読み、"
-        "その投稿に 👍 リアクションを付けてください。"
+        f"【{guild_name}｜認証のお願い】\n"
+        "まだサーバーの認証が完了していないようです。\n"
+        "以下のルール投稿を確認して、その投稿に 👍 リアクションを付けてください。\n"
+        f"{url}"
     )
 
-REMINDER_MARKERS = (
-    "認証がまだ完了していないようです",
-    "まだ認証が完了していないようです",
-)
 
-
-async def reconcile_channel_history(
-    channel: discord.TextChannel,
-    muted_ids: set[int],
-    bot_user_id: int,
-    dry_run: bool,
-) -> tuple[set[int], int]:
-    """Deduplicate mentions and remove this bot's obsolete reminder messages.
-
-    Only one-user reminder messages authored by this bot are deleted.
-    Human messages and unrelated bot messages are never modified.
-    """
-    mentions_for_muted: set[int] = set()
-    removed = 0
-    scanned = 0
-    failures = 0
-    async for message in channel.history(limit=None):
-        scanned += 1
-        mentioned_ids = {user.id for user in message.mentions}
-        mentions_for_muted.update(mentioned_ids & muted_ids)
-        is_our_reminder = (
-            message.author.id == bot_user_id
-            and any(marker in message.content for marker in REMINDER_MARKERS)
-            and len(mentioned_ids) == 1
-        )
-        if is_our_reminder and not (mentioned_ids & muted_ids):
-            if dry_run:
-                LOG.info("Dry-run: would remove completed reminder message %d", message.id)
-            else:
-                try:
-                    await message.delete()
-                except discord.HTTPException:
-                    failures += 1
-                    LOG.exception("Could not delete completed reminder message %d", message.id)
-                else:
-                    LOG.info("Deleted completed reminder message %d", message.id)
-            removed += 1
-    LOG.info(
-        "History scanned=%d, currently-muted mentions=%d, obsolete reminders=%d",
-        scanned, len(mentions_for_muted), removed,
-    )
-    if failures:
-        raise RuntimeError(f"Failed to delete {failures} obsolete reminder messages")
-    return mentions_for_muted, removed
-
-
-async def scan(client: discord.Client, cfg: Config) -> None:
+async def scan(client: discord.Client, cfg: Config, only_user_id: int | None = None) -> None:
     guild = client.get_guild(cfg.guild_id)
     if guild is None:
         raise RuntimeError("Bot was not invited to configured guild")
+
     if cfg.role_id:
         role = guild.get_role(cfg.role_id)
     else:
@@ -151,79 +113,69 @@ async def scan(client: discord.Client, cfg: Config) -> None:
     if role is None:
         raise RuntimeError("Muted role not found")
 
-    channel = client.get_channel(cfg.channel_id) or await client.fetch_channel(cfg.channel_id)
-    if not isinstance(channel, discord.TextChannel) or channel.guild.id != cfg.guild_id:
-        raise RuntimeError("Verification channel ID is not a text channel in this guild")
-
-    me = guild.me
-    if me is None:
-        raise RuntimeError("Bot server member could not be found")
-    permissions = channel.permissions_for(me)
-    if not (permissions.view_channel and permissions.send_messages and permissions.read_message_history):
-        raise RuntimeError(
-            "VerifyNudge needs View Channel, Send Messages and Read Message History"
-        )
+    rules_channel = guild.get_channel(cfg.rules_channel_id) or await client.fetch_channel(cfg.rules_channel_id)
+    if not isinstance(rules_channel, discord.TextChannel) or rules_channel.guild.id != cfg.guild_id:
+        raise RuntimeError("Rules channel ID is not a text channel in the configured server")
 
     muted_members: list[discord.Member] = []
-    checked = 0
+    count = 0
     async for member in guild.fetch_members(limit=None):
-        checked += 1
+        count += 1
         if not member.bot and role in member.roles:
             muted_members.append(member)
-    muted = {member.id for member in muted_members}
 
-    # History is checked on every scan, even if local state is missing.
-    # Users who have cleared Muted no longer need their reminder posted here.
-    historical, removed = await reconcile_channel_history(
-        channel, muted, client.user.id, cfg.dry_run
-    )
+    muted_ids = {member.id for member in muted_members}
     previous = load_state(cfg.state_path, cfg.guild_id)
-    notified = (previous & muted) | historical
-    recent_first = [
-        member.id
-        for member in sorted(
-            muted_members,
-            key=lambda member: (member.joined_at or member.created_at, member.id),
-            reverse=True,
-        )
-    ]
-    pending = plan(muted, notified, cfg.batch_size, ordered_ids=recent_first)
+    # A separate DM-only state prevents old public mentions from blocking first DMs.
+    notified = previous & muted_ids
+    candidates = sorted(
+        muted_members,
+        key=lambda m: (m.joined_at or m.created_at, m.id),
+        reverse=True,
+    )
+    if only_user_id is not None:
+        candidates = [m for m in candidates if m.id == only_user_id]
+        if not candidates:
+            raise RuntimeError(f"Target {only_user_id} was not found with the Muted role")
+
+    pending = [m for m in candidates if m.id not in notified][:cfg.batch_size]
     LOG.info(
-        "Members=%d Muted=%d history_skipped=%d obsolete=%d pending=%d dry_run=%s",
-        checked, len(muted), len(historical), removed, len(pending), cfg.dry_run,
+        "Delivery=private-DM, rules_channel=%d, members=%d, muted=%d, "
+        "already_dmed=%d, new=%d, dry_run=%s",
+        cfg.rules_channel_id, count, len(muted_ids), len(notified), len(pending), cfg.dry_run,
     )
     if cfg.dry_run:
-        LOG.info("Dry-run targets: %s", pending)
+        LOG.info("Dry-run DM targets: %s", [m.id for m in pending])
         return
 
     if notified != previous:
         save_state(cfg.state_path, cfg.guild_id, notified)
 
-    send_failures = 0
-    for uid in pending:
-        reference = (discord.MessageReference(
-            message_id=cfg.message_id, channel_id=cfg.channel_id,
-            guild_id=cfg.guild_id, fail_if_not_exists=False
-        ) if cfg.message_id else None)
+    content = reminder_content(
+        guild.name, cfg.guild_id, cfg.rules_channel_id, cfg.rules_message_id
+    )
+    failures = 0
+    for member in pending:
         try:
-            await channel.send(
-                reminder_content(uid, cfg.rules_channel_id or cfg.channel_id),
-                reference=reference,
-                allowed_mentions=discord.AllowedMentions(
-                    everyone=False, roles=False, users=True, replied_user=False
-                )
-            )
-        except discord.HTTPException:
-            send_failures += 1
-            LOG.exception("Could not notify user %d; will retry next hour", uid)
+            # Direct messages are visible to the recipient only. Never publish
+            # a fallback message into the shared server channel on failure.
+            await member.send(content, allowed_mentions=discord.AllowedMentions.none())
+        except discord.Forbidden:
+            failures += 1
+            LOG.warning("Could not DM user %d (DMs blocked or unavailable)", member.id)
             continue
-        notified.add(uid)
+        except discord.HTTPException:
+            failures += 1
+            LOG.exception("Discord failed to deliver DM to user %d", member.id)
+            continue
+        notified.add(member.id)
         save_state(cfg.state_path, cfg.guild_id, notified)
-        LOG.info("Notified user %d", uid)
-    if send_failures:
-        raise RuntimeError(f"Failed to notify {send_failures} members")
+        LOG.info("DM sent to user %d", member.id)
+    if failures:
+        raise RuntimeError(f"Failed to deliver private DMs to {failures} member(s)")
 
-async def run(cfg: Config) -> None:
+
+async def run(cfg: Config, only_user_id: int | None = None) -> None:
     intents = discord.Intents.none()
     intents.guilds = True
     intents.members = True
@@ -238,7 +190,7 @@ async def run(cfg: Config) -> None:
             return
         started = True
         try:
-            await scan(client, cfg)
+            await scan(client, cfg, only_user_id)
         except Exception as exc:
             failure = exc
             LOG.exception("Scan failed")
@@ -256,6 +208,7 @@ async def run(cfg: Config) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--only-user", type=int, help="Test one Muted member only")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     # Preserve the exact output of Task Scheduler runs in a local rolling log.
@@ -270,7 +223,7 @@ def main() -> int:
         cfg = config()
         if args.dry_run:
             cfg = Config(**{**vars(cfg), "dry_run": True})
-        asyncio.run(run(cfg))
+        asyncio.run(run(cfg, args.only_user))
         return 0
     except Exception:
         LOG.exception("VerifyNudge failed")

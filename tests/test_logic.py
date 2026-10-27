@@ -1,95 +1,63 @@
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from verifynudge import reconcile_channel_history, load_state, plan, reminder_content, save_state
+from unittest.mock import patch
+from verifynudge import Config, load_state, plan, reminder_content, save_state, scan
 
-class NotifyTests(unittest.TestCase):
-    def test_only_new_muted(self):
-        self.assertEqual(plan({1,2,3}, {1}, 1), [2])
+class LogicTests(unittest.TestCase):
+    def test_priority(self):
+        self.assertEqual(plan({1,2,3}, {2}, 10, ordered_ids=[3,2,1]), [3,1])
 
-    def test_newest_joined_has_priority(self):
-        self.assertEqual(plan({10, 20, 30}, {20}, 1, ordered_ids=[30, 20, 10]), [30])
+    def test_dm_link(self):
+        msg=reminder_content("Test Server",123,456,789)
+        self.assertIn("https://discord.com/channels/123/456/789",msg)
+        self.assertIn("👍",msg)
+        self.assertNotIn("<@123>",msg)
 
-    def test_reentry(self):
-        old = {42}
-        cleared = old & set()
-        self.assertEqual(plan({42}, cleared, 10), [42])
-
-    def test_reminder_links_to_rules_channel(self):
-        message = reminder_content(123, 456)
-        self.assertIn('<@123>', message)
-        self.assertIn('<#456>', message)
-        self.assertIn('\U0001F44D', message)
+    def test_channel_link_fallback(self):
+        self.assertIn("123/456",reminder_content("Test",123,456,None))
 
     def test_state(self):
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp) / "state.json"
-            save_state(state, 123, {3,1})
-            self.assertEqual(load_state(state, 123), {1,3})
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/"dm-state.json"
+            save_state(path,123,{1,2})
+            self.assertEqual(load_state(path,123),{1,2})
             with self.assertRaises(ValueError):
-                load_state(state, 456)
+                load_state(path,456)
 
-class HistoryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_existing_mentions_suppress_repeat_and_delete_obsolete(self):
-        class FakeMessage:
-            def __init__(self, message_id, author_id, content, mentioned):
-                self.id = message_id
-                self.author = SimpleNamespace(id=author_id)
-                self.content = content
-                self.mentions = [SimpleNamespace(id=uid) for uid in mentioned]
-                self.deleted = False
+class DMTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dm_only_and_not_duplicated(self):
+        with tempfile.TemporaryDirectory() as folder:
+            role=SimpleNamespace(id=2,name="Muted")
+            guild=SimpleNamespace(id=123,name="Test Server")
+            rules=SimpleNamespace(id=456,guild=guild)
+            guild.get_role=lambda rid: role if rid==2 else None
+            guild.get_channel=lambda cid: rules if cid==456 else None
+            class Member:
+                id=999
+                bot=False
+                roles=[role]
+                joined_at=datetime(2026,1,1,tzinfo=timezone.utc)
+                created_at=joined_at
+                def __init__(self): self.sent=[]
+                async def send(self,content,**kwargs): self.sent.append(content)
+            user=Member()
+            async def members(limit=None): yield user
+            guild.fetch_members=members
+            client=SimpleNamespace(get_guild=lambda gid:guild)
+            cfg=Config(
+                token="fake",guild_id=123,channel_id=111,role_id=2,role_name="Muted",
+                message_id=None,rules_channel_id=456,rules_message_id=789,dry_run=False,
+                batch_size=9999,state_path=Path(folder)/"dm.json"
+            )
+            with patch("verifynudge.discord.TextChannel",type(rules)):
+                await scan(client,cfg)
+                await scan(client,cfg)
+            self.assertEqual(len(user.sent),1)
+            self.assertIn("/456/789",user.sent[0])
+            self.assertEqual(load_state(cfg.state_path,123),{999})
 
-            async def delete(self):
-                self.deleted = True
-
-        reminder = "認証がまだ完了していないようです"
-        keep = FakeMessage(1, 999, reminder, [22])
-        delete = FakeMessage(2, 999, reminder, [33])
-        unrelated = FakeMessage(3, 999, "not a reminder", [44])
-        human = FakeMessage(4, 12, reminder, [55])
-        mixed = FakeMessage(5, 999, reminder, [33, 22])
-        msgs = [keep, delete, unrelated, human, mixed]
-
-        class FakeChannel:
-            async def history(self, limit=None):
-                assert limit is None
-                for msg in msgs:
-                    yield msg
-
-        found, removed = await reconcile_channel_history(FakeChannel(), {22, 55}, 999, False)
-        self.assertEqual(found, {22, 55})
-        self.assertEqual(removed, 1)
-        self.assertTrue(delete.deleted)
-        self.assertFalse(any(m.deleted for m in [keep, unrelated, human, mixed]))
-        self.assertEqual(plan({22, 55, 66}, found, 10), [66])
-
-    async def test_dry_run_does_not_delete(self):
-        class FakeMessage:
-            id = 1
-            author = SimpleNamespace(id=999)
-            content = "認証がまだ完了していないようです"
-            mentions = [SimpleNamespace(id=33)]
-
-            async def delete(self):
-                raise AssertionError("Dry-run must never delete")
-
-        class FakeChannel:
-            async def history(self, limit=None):
-                yield FakeMessage()
-
-        found, removed = await reconcile_channel_history(FakeChannel(), {22}, 999, True)
-        self.assertEqual(found, set())
-        self.assertEqual(removed, 1)
-
-    async def test_empty_history(self):
-        class FakeChannel:
-            async def history(self, limit=None):
-                if False:
-                    yield
-
-        self.assertEqual(await reconcile_channel_history(FakeChannel(), set(), 999, False), (set(), 0))
-
-
-if __name__ == "__main__":
+if __name__=="__main__":
     unittest.main()

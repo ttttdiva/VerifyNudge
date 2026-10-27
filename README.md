@@ -1,25 +1,14 @@
 # VerifyNudge
 
-A minimal, self-hosted Discord bot to remind **unverified members** to react to an existing verification post. Intended for servers where the `Muted` role denotes an unverified user.
+A lightweight Discord bot that privately reminds unverified members to react to a rules post **via direct messages (DMs)**. It posts **nothing** into shared server channels.
 
-**VerifyNudge is not a verification bot.** It does not assign or remove roles or manage reactions; it only posts reminders.
+Discord ephemeral replies require an interaction initiated by the user; a scheduled proactive notification must use DMs instead.
 
-## Behavior
+## Setup (Windows)
 
-- Start once per hour, scan the target server for members with a configured role (default: `Muted`).
-- Mention newly found users in your verification channel; optionally reply to an existing verification post.
-- Prevent duplicates by checking both the local notification state and existing member mentions in the notification channel's full message history. Previously mentioned users are skipped even if local state is lost. Read Message History permission is required.
-- Limit new mentions to 9,999 per run by default.
-- Exit after each scan; use your own scheduler. Default is `DRY_RUN=true`, which never sends messages.
-
-## Preparation
-
-1. Create a Discord application and bot at https://discord.com/developers/applications .
-2. Enable **Server Members Intent** in the application Bot settings.
-3. Invite the bot to your server. Grant **View Channels** and **Send Messages** for the verification channel. No Administrator or Manage Roles permission is required.
-4. Make sure the server has a Muted (unverified) role and a verification channel.
-
-## Installation (Windows / PowerShell)
+1. Create a Discord Bot and enable **Server Members Intent** in Discord Developer Portal.
+2. Invite it to the target server. It does not need Manage Roles or Administrator.
+3. Install Python 3.10 or later.
 
 ```powershell
 git clone https://github.com/ttttdiva/VerifyNudge.git
@@ -29,51 +18,27 @@ py -3 -m venv .venv
 Copy-Item .env.example .env
 ```
 
-Fill in `.env` with your **own** Discord bot token, server ID, and verification channel ID. Prefer setting `DISCORD_MUTED_ROLE_ID` (a stable role ID) instead of relying on the role name.
-
-Set `DISCORD_RULES_CHANNEL_ID` to the channel containing the rules post that users must react to. The bot mentions that channel in the reminder while **posting the reminder to** `DISCORD_VERIFICATION_CHANNEL_ID`. If `DISCORD_RULES_CHANNEL_ID` is blank, the reminder points to the notification channel instead.
-
-Optional: `DISCORD_VERIFICATION_MESSAGE_ID` makes the reminder reply to an existing message **in the notification channel**. This does not change the rules/reaction target.
-
-Test the scan without sending:
+Edit `.env`: set the Bot token, server ID, Muted role ID, rules channel ID, and ideally the exact rules message ID. NEVER commit your token.
 
 ```powershell
+# See targets without sending
 .\.venv\Scripts\python.exe verifynudge.py --dry-run
-```
 
-When the correct test user appears in the scan logs, change `DRY_RUN=false` in `.env` and run the same script without `--dry-run` to send one test reminder.
+# Send a test DM ONLY to one Muted test member (when DRY_RUN=false)
+.\.venv\Scripts\python.exe verifynudge.py --only-user 123456789012345678
 
-## Hourly Windows task
-
-After manual verification, register the hourly task using the virtual environment in this checkout:
-
-```powershell
+# After testing, optionally register an hourly task
 .\scripts\install-hourly-task.ps1
 ```
 
-To disable or enable the task:
+- DISCORD_BOT_TOKEN: local secret.
+- DISCORD_GUILD_ID: target server.
+- DISCORD_MUTED_ROLE_ID: unverified role (or name fallback).
+- DISCORD_RULES_CHANNEL_ID: required rules channel.
+- DISCORD_RULES_MESSAGE_ID: optional exact post to link to.
+- MAX_NOTIFICATIONS_PER_RUN: default 9999.
+- DRY_RUN: true (default) disables sending.
 
-```powershell
-Disable-ScheduledTask -TaskName VerifyNudge
-Enable-ScheduledTask -TaskName VerifyNudge
-```
+Sends once per user while they remain Muted. Local DM notification history: `data/dm-state-<guild-id>.json`. Failed DMs are logged, with no public fallback; some users block DMs from Bots. Logs/DM state/`.env` are ignored by Git.
 
-The scheduler task uses the name `VerifyNudge` and is intended for one installation per Windows host. The computer must be running for scheduled checks.
-
-## Configuration reference
-
-| Environment variable | Purpose |
-| --- | --- |
-| `DISCORD_BOT_TOKEN` | Secret bot token (never commit) |
-| `DISCORD_GUILD_ID` | Target server ID |
-| `DISCORD_VERIFICATION_CHANNEL_ID` | Verification channel ID |
-| `DISCORD_RULES_CHANNEL_ID` | Channel containing the rules post (defaults to notification channel if unset) |
-| `DISCORD_MUTED_ROLE_ID` | Unverified role ID (preferred) |
-| `DISCORD_MUTED_ROLE_NAME` | Fallback role name (default Muted) |
-| `DISCORD_VERIFICATION_MESSAGE_ID` | Optional post ID for message replies |
-| `MAX_NOTIFICATIONS_PER_RUN` | Message cap per scan (default 9999) |
-| `DRY_RUN` | true: log but never post (default) |
-
-Notification history is stored in a Git-ignored `data/state-<guild-id>.json`. Local `.env`, virtual environments, and the state directory are ignored by Git. **Never commit private credentials**.
-
-Built with [discord.py](https://discordpy.readthedocs.io/). MIT licensed.
+MIT License.
