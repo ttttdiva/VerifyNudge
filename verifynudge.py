@@ -21,6 +21,7 @@ class Config:
     role_id: int | None
     role_name: str
     message_id: int | None
+    rules_channel_id: int | None
     dry_run: bool
     batch_size: int
     state_path: Path
@@ -49,6 +50,7 @@ def config() -> Config:
         role_id=optional_id(os.getenv("DISCORD_MUTED_ROLE_ID")),
         role_name=os.getenv("DISCORD_MUTED_ROLE_NAME", "Muted"),
         message_id=optional_id(os.getenv("DISCORD_VERIFICATION_MESSAGE_ID")),
+        rules_channel_id=optional_id(os.getenv("DISCORD_RULES_CHANNEL_ID")),
         dry_run=os.getenv("DRY_RUN", "true").lower() not in ("false", "0", "no"),
         batch_size=batch_size, state_path=ROOT / "data" / f"state-{guild_id}.json",
     )
@@ -69,6 +71,14 @@ def save_state(path: Path, guild_id: int, ids: set[int]) -> None:
 
 def plan(muted: set[int], notified: set[int], limit: int) -> list[int]:
     return sorted(muted - notified)[:limit]
+
+def reminder_content(user_id: int, rules_channel_id: int) -> str:
+    """Build a clickable reminder to react to the rules post."""
+    return (
+        f"<@{user_id}> 認証がまだ完了していないようです。"
+        f"ルールチャンネル <#{rules_channel_id}> にあるルール確認の投稿を読み、"
+        "その投稿に 👍 リアクションを付けてください。"
+    )
 
 async def scan(client: discord.Client, cfg: Config) -> None:
     guild = client.get_guild(cfg.guild_id)
@@ -112,7 +122,7 @@ async def scan(client: discord.Client, cfg: Config) -> None:
         ) if cfg.message_id else None)
         try:
             await channel.send(
-                f"<@{uid}> まだ認証が完了していないようです。このチャンネルの認証用投稿に 👍 リアクションを付けてください。",
+                reminder_content(uid, cfg.rules_channel_id or cfg.channel_id),
                 reference=reference,
                 allowed_mentions=discord.AllowedMentions(
                     everyone=False, roles=False, users=True, replied_user=False

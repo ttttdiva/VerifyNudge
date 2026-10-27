@@ -31,7 +31,9 @@ Copy-Item .env.example .env
 
 Fill in `.env` with your **own** Discord bot token, server ID, and verification channel ID. Prefer setting `DISCORD_MUTED_ROLE_ID` (a stable role ID) instead of relying on the role name.
 
-Optional: Set `DISCORD_VERIFICATION_MESSAGE_ID` if the reminder should be a reply to an existing verification post. If omitted, it is a regular message in that channel, mentioning the target user.
+Set `DISCORD_RULES_CHANNEL_ID` to the channel containing the rules post that users must react to. The bot mentions that channel in the reminder while **posting the reminder to** `DISCORD_VERIFICATION_CHANNEL_ID`. If `DISCORD_RULES_CHANNEL_ID` is blank, the reminder points to the notification channel instead.
+
+Optional: `DISCORD_VERIFICATION_MESSAGE_ID` makes the reminder reply to an existing message **in the notification channel**. This does not change the rules/reaction target.
 
 Test the scan without sending:
 
@@ -65,6 +67,7 @@ The scheduler task uses the name `VerifyNudge` and is intended for one installat
 | `DISCORD_BOT_TOKEN` | Secret bot token (never commit) |
 | `DISCORD_GUILD_ID` | Target server ID |
 | `DISCORD_VERIFICATION_CHANNEL_ID` | Verification channel ID |
+| `DISCORD_RULES_CHANNEL_ID` | Channel containing the rules post (defaults to notification channel if unset) |
 | `DISCORD_MUTED_ROLE_ID` | Unverified role ID (preferred) |
 | `DISCORD_MUTED_ROLE_NAME` | Fallback role name (default Muted) |
 | `DISCORD_VERIFICATION_MESSAGE_ID` | Optional post ID for message replies |
