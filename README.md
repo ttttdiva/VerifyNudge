@@ -9,7 +9,7 @@ A minimal, self-hosted Discord bot to remind **unverified members** to react to 
 - Start once per hour, scan the target server for members with a configured role (default: `Muted`).
 - Mention newly found users in your verification channel; optionally reply to an existing verification post.
 - Prevent duplicates by checking both the local notification state and existing member mentions in the notification channel's full message history. Previously mentioned users are skipped even if local state is lost. Read Message History permission is required.
-- Limit new mentions to 10 per run by default.
+- Limit new mentions to 9,999 per run by default.
 - Exit after each scan; use your own scheduler. Default is `DRY_RUN=true`, which never sends messages.
 
 ## Preparation
@@ -71,7 +71,7 @@ The scheduler task uses the name `VerifyNudge` and is intended for one installat
 | `DISCORD_MUTED_ROLE_ID` | Unverified role ID (preferred) |
 | `DISCORD_MUTED_ROLE_NAME` | Fallback role name (default Muted) |
 | `DISCORD_VERIFICATION_MESSAGE_ID` | Optional post ID for message replies |
-| `MAX_NOTIFICATIONS_PER_RUN` | Message cap per scan (default 10) |
+| `MAX_NOTIFICATIONS_PER_RUN` | Message cap per scan (default 9999) |
 | `DRY_RUN` | true: log but never post (default) |
 
 Notification history is stored in a Git-ignored `data/state-<guild-id>.json`. Local `.env`, virtual environments, and the state directory are ignored by Git. **Never commit private credentials**.
