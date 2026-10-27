@@ -8,7 +8,7 @@ A minimal, self-hosted Discord bot to remind **unverified members** to react to 
 
 - Start once per hour, scan the target server for members with a configured role (default: `Muted`).
 - Mention newly found users in your verification channel; optionally reply to an existing verification post.
-- Notify a member **once per unverified period**, not every hour. When the member is seen without the role, forget their notification record.
+- Prevent duplicates by checking both the local notification state and existing member mentions in the notification channel's full message history. Previously mentioned users are skipped even if local state is lost. Read Message History permission is required.
 - Limit new mentions to 10 per run by default.
 - Exit after each scan; use your own scheduler. Default is `DRY_RUN=true`, which never sends messages.
 

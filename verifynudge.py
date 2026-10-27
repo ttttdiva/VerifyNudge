@@ -80,6 +80,24 @@ def reminder_content(user_id: int, rules_channel_id: int) -> str:
         "その投稿に 👍 リアクションを付けてください。"
     )
 
+async def already_mentioned_in_channel(
+    channel: discord.TextChannel, user_ids: set[int]
+) -> set[int]:
+    """Find Muted users already mentioned in the verification channel history."""
+    remaining = set(user_ids)
+    found: set[int] = set()
+    if not remaining:
+        return found
+    async for message in channel.history(limit=None):
+        matches = remaining.intersection(user.id for user in message.mentions)
+        if matches:
+            found.update(matches)
+            remaining.difference_update(matches)
+            if not remaining:
+                break
+    return found
+
+
 async def scan(client: discord.Client, cfg: Config) -> None:
     guild = client.get_guild(cfg.guild_id)
     if guild is None:
@@ -106,8 +124,13 @@ async def scan(client: discord.Client, cfg: Config) -> None:
             muted.add(member.id)
     previous = load_state(cfg.state_path, cfg.guild_id)
     notified = previous & muted
+    # Scan history for users not in local state. Avoids duplicate notifications
+    # after a restart, state-file loss, or an earlier human/bot mention.
+    # Do this BEFORE applying the per-run send limit.
+    historical = await already_mentioned_in_channel(channel, muted - notified)
+    notified.update(historical)
     pending = plan(muted, notified, cfg.batch_size)
-    LOG.info("Members=%d Muted=%d new=%d dry_run=%s", checked, len(muted), len(pending), cfg.dry_run)
+    LOG.info("Members=%d Muted=%d history_skipped=%d new=%d dry_run=%s", checked, len(muted), len(historical), len(pending), cfg.dry_run)
     if cfg.dry_run:
         LOG.info("Dry-run targets: %s", pending)
         return
